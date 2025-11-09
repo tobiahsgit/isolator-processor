@@ -39,7 +39,24 @@ app.post("/", async (req, res) => {
     const out = "/tmp/source.m4a";
     await exec("yt-dlp", ["-f", "bestaudio/best", "-x", "--audio-format", "m4a", "-o", out, url]);
 
-    await postSlack(channel, thread_ts, "🎛 splitting… (LALAL placeholder)");
+// --- REAL STEM SPLITTING (Demucs Lite) ---
+const { execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+async function runDemucs(inputPath, outputDir) {
+  const cmd = `python3 -m demucs.separate --two-stems=vocals -n htdemucs --out "${outputDir}" "${inputPath}"`;
+  execSync(cmd, { stdio: "inherit" });
+
+  const resultDir = path.join(outputDir, "htdemucs", path.basename(inputPath, path.extname(inputPath)));
+  const vocalPath = path.join(resultDir, "vocals.wav");
+  const instrPath = path.join(resultDir, "no_vocals.wav");
+  return { vocalPath, instrPath };
+}
+
+await slackPost("🎚 splitting with Demucs...");
+const { vocalPath, instrPath } = await runDemucs(tempFile, "./output");
+await slackPost("✅ stems ready, uploading...");
 
     const bpm = 125, key = "F#"; // placeholder
 
