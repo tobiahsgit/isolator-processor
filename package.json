@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "pip3 install yt-dlp"
+    "postinstall": "pip3 install demucs==4.0.1"
   },
   "dependencies": {
     "express": "^4.19.2",
