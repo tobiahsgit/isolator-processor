@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "pip3 install demucs==4.0.1"
+    "postinstall": "python3 -m pip install --upgrade pip && python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.2.2 torchaudio==2.2.2 demucs==4.0.1"
   },
   "dependencies": {
     "express": "^4.19.2",

@@ -1,3 +1,4 @@
 ffmpeg
 python3
 python3-pip
+libsndfile1
