@@ -1,7 +1,7 @@
 import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
-import { execFile } from "child_process";
+import { execFile } from 'node:child_process';
 import { promisify } from "util";
 const exec = promisify(execFile);
 
