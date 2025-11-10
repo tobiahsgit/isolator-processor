@@ -2,10 +2,10 @@
   "name": "isolator-processor",
   "version": "1.0.0",
   "main": "server.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "postinstall": "python3 -m pip install --upgrade pip && python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu torchaudio==2.5.1+cpu demucs==4.0.1 yt-dlp==2024.10.22"
+    "postinstall": "python3 -m pip install --upgrade pip && python3 -m pip install yt-dlp==2024.10.22"
   },
   "dependencies": {
     "express": "^4.19.2",
