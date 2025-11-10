@@ -55,7 +55,7 @@ async function runDemucs(inputPath, outputDir) {
 }
 
 await slackPost("🎚 splitting with Demucs...");
-const { vocalPath, instrPath } = await runDemucs(tempFile, "./output");
+const { vocalPath, instrPath } = await runDemucs(tempFile, "/tmp/output");
 await slackPost("✅ stems ready, uploading...");
 
     const bpm = 125, key = "F#"; // placeholder
