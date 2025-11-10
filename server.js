@@ -1,33 +1,90 @@
-import express from 'express';
-import crypto from 'crypto';
+import express from "express";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+const PORT = process.env.PORT || 10000;
+const PROCESSOR_TOKEN = process.env.PROCESSOR_TOKEN || "";
 
-function auth(req,res,next){
-  const header = req.get('authorization') || '';
-  const token  = header.replace(/^Bearer\s+/i,'').trim();
-  const secret = process.env.PROCESSOR_TOKEN || '';
-  if (!token || !secret) return res.status(401).json({ error: 'unauthorized' });
-  const a = Buffer.from(token);
-  const b = Buffer.from(secret);
-  if (a.length !== b.length) return res.status(401).json({ error: 'unauthorized' });
-  try {
-    if (!crypto.timingSafeEqual(a,b)) return res.status(401).json({ error: 'unauthorized' });
-  } catch {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
-  next();
+// Capture raw body so HMAC matches the Worker’s exact JSON string
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; }
+}));
+
+function hmacHex(key, msgUtf8) {
+  return crypto.createHmac("sha256", key).update(msgUtf8, "utf8").digest("hex");
 }
 
-app.get('/health', (_req,res)=>res.json({ ok:true }));
+function timingSafeEq(a, b) {
+  try {
+    const A = Buffer.from(a);
+    const B = Buffer.from(b);
+    if (A.length !== B.length) return false;
+    return crypto.timingSafeEqual(A, B);
+  } catch { return false; }
+}
 
-// intake-only for now: verify auth, validate payload, ack
-app.post('/', auth, async (req,res)=>{
-  const { mode, url, title } = req.body || {};
-  if (!mode || !url) return res.status(400).json({ error:'missing mode/url' });
-  return res.json({ ok:true, intake:true, mode, url, title: title || null });
+function isAuthorized(req) {
+  // Option 1: Bearer token
+  const auth = req.headers.authorization || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (bearer && bearer === PROCESSOR_TOKEN) return true;
+
+  // Option 2: HMAC header (raw hex, no v0=)
+  const sig = req.headers["x-isolator-signature"];
+  if (sig && req.rawBody && PROCESSOR_TOKEN) {
+    const want = hmacHex(PROCESSOR_TOKEN, req.rawBody.toString("utf8"));
+    if (timingSafeEq(String(sig), want)) return true;
+  }
+  return false;
+}
+
+// Health
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Intake (root path "/")
+app.post("/", async (req, res) => {
+  if (!isAuthorized(req)) {
+    console.log("AUTH FAIL");
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+
+  const { mode, url, title, channel, thread_ts } = req.body || {};
+  console.log("INTAKE", { mode, url, title, channel, thread_ts });
+
+  // Fast ACK so Worker can show 200
+  res.json({ ok: true, intake: true, mode, url, title });
+
+  // ↓ Do your actual processing after ACK (don’t await)
+  try {
+    // Example: download audio via yt_dlp (python module)
+    const outFile = "/tmp/source.m4a";
+    await new Promise((resolve, reject) => {
+      const p = execFile("python3", ["-m", "yt_dlp",
+        "-f", "bestaudio/best",
+        "-x", "--audio-format", "m4a",
+        "-o", outFile, url
+      ], { env: process.env }, (err, stdout, stderr) => {
+        if (err) { console.error(err); reject(err); return; }
+        console.log(stdout || stderr || "yt_dlp done");
+        resolve();
+      });
+    });
+
+    console.log("DOWNLOADED", outFile);
+
+    // TODO: run Demucs here as you already wired up
+    // log something visible so you know it’s moving:
+    console.log("DEMUX START", outFile);
+
+  } catch (e) {
+    console.error("PROCESS ERROR", e);
+  }
 });
 
-const port = process.env.PORT || 10000;
-app.listen(port, ()=>console.log('processor up on', port));
+// Start
+app.listen(PORT, () => {
+  console.log(`processor up on ${PORT}`);
+});
