@@ -7,6 +7,18 @@ import path from "node:path";
 const app = express();
 const PORT = process.env.PORT || 10000;
 const PROCESSOR_TOKEN = process.env.PROCESSOR_TOKEN || "";
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "";
+
+// tiny Slack helper (safe if token missing)
+async function slackPost(token, payload){
+  if(!token) return;
+  await fetch("https://slack.com/api/chat.postMessage", {
+    method:"POST",
+    headers:{ "Authorization": `Bearer ${token}`, "Content-Type":"application/json; charset=utf-8" },
+    body: JSON.stringify(payload)
+  });
+}
+
 
 // Capture raw body so HMAC matches the Worker’s exact JSON string
 app.use(express.json({
@@ -78,6 +90,36 @@ app.post("/", async (req, res) => {
     // TODO: run Demucs here as you already wired up
     // log something visible so you know it’s moving:
     console.log("DEMUX START", outFile);
+
+  // === after demucs completes and you know where the files are ===
+  // Placeholder paths until Demucs output wiring is finished:
+  const outDir = "/tmp"; // change to your real Demucs output dir
+  const vocalOut = path.join(outDir, "vocals.wav");
+  const instrOut = path.join(outDir, "no_vocals.wav");
+
+  // Log for Render
+  console.log("DEMUX DONE", { vocalOut, instrOut });
+
+  // Optional: notify Slack thread if channel/thread_ts were provided
+  if (SLACK_BOT_TOKEN && channel && thread_ts) {
+    await slackPost(SLACK_BOT_TOKEN, {
+      channel,
+      thread_ts,
+      text: "✅ Split complete. Uploading stems…"
+    });
+  }
+
+  // TODO: your Dropbox upload here; after upload, ping Slack with the links.
+  // await uploadToDropbox(vocalOut, …); await uploadToDropbox(instrOut, …);
+
+  // Final Slack confirmation (comment out if you only want links)
+  if (SLACK_BOT_TOKEN && channel && thread_ts) {
+    await slackPost(SLACK_BOT_TOKEN, {
+      channel,
+      thread_ts,
+      text: "✅ Stems ready (vocals / instrumental)."
+    });
+  }
 
   } catch (e) {
     console.error("PROCESS ERROR", e);
