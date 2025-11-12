@@ -14,7 +14,7 @@ const COOKIES_B64 = process.env.YTDLP_COOKIES_B64 || "";
 let COOKIES_PATH = "";
 if (COOKIES_B64) {
   COOKIES_PATH = "/tmp/yt_cookies.txt";
-  try { fs.writeFileSync(COOKIES_PATH, Buffer.from(COOKIES_B64, "base64")); } catch {}
+  try { fs.writeFileSync(cookiesPath, Buffer.from(COOKIES_B64, "base64")); } catch {}
 }
 
 // capture raw body (for HMAC)
@@ -109,15 +109,14 @@ if (!isAuthorized(req)) {
 
 // include cookies_b64 from body; keep other fields
 const { mode, url, title, channel, thread_ts } = req.body || {};
-const cookies_b64 = (req.body const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {};const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {}; req.body.cookies_b64) || req.headers["x-isolator-cookies-b64"];
+const cookies_b64 = (req.body && req.body.cookies_b64) || req.headers["x-isolator-cookies-b64"];
 console.log("INTAKE", { mode, url, title, channel, thread_ts });
-
 // optional cookie file for yt-dlp anti-bot
 let cookiesPath = COOKIES_PATH;
 try {
   if (cookies_b64) {
     const raw = Buffer.from(String(cookies_b64), "base64");
-    fs.writeFileSync(COOKIES_PATH, raw);
+    fs.writeFileSync(cookiesPath, raw);
     console.log("COOKIE FILE WRITTEN", cookiesPath);
   }
 } catch (e) {
@@ -163,6 +162,14 @@ try {
 app.listen(PORT, () => console.log(`processor up on ${PORT}`));
 
 // 413 handler for large JSON bodies (cookies_b64 can be big)
+app.use(function (err, req, res, next) {
+  if (err && err.type === "entity.too.large") {
+    return res.status(413).json({ ok:false, error:"payload_too_large" });
+  }
+  next(err);
+});
+
+// 413 handler for large JSON bodies (cookies_b64)
 app.use(function (err, req, res, next) {
   if (err && err.type === "entity.too.large") {
     return res.status(413).json({ ok:false, error:"payload_too_large" });
