@@ -18,7 +18,7 @@ if (COOKIES_B64) {
 }
 
 // capture raw body (for HMAC)
-app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+app.use(express.json({ limit: "8mb", verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 function hmacHex(key, msgUtf8) {
   return crypto.createHmac("sha256", key).update(msgUtf8, "utf8").digest("hex");
@@ -108,7 +108,8 @@ if (!isAuthorized(req)) {
 }
 
 // include cookies_b64 from body; keep other fields
-const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {};
+const { mode, url, title, channel, thread_ts } = req.body || {};
+const cookies_b64 = (req.body const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {};const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {}; req.body.cookies_b64) || req.headers["x-isolator-cookies-b64"];
 console.log("INTAKE", { mode, url, title, channel, thread_ts });
 
 // optional cookie file for yt-dlp anti-bot
@@ -160,3 +161,11 @@ try {
 });
 
 app.listen(PORT, () => console.log(`processor up on ${PORT}`));
+
+// 413 handler for large JSON bodies (cookies_b64 can be big)
+app.use(function (err, req, res, next) {
+  if (err && err.type === "entity.too.large") {
+    return res.status(413).json({ ok:false, error:"payload_too_large" });
+  }
+  next(err);
+});
