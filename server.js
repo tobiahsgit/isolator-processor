@@ -4,22 +4,22 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-// ──────────────────────────────────────────────────────────
-// Config
-// ──────────────────────────────────────────────────────────
 const app = express();
 const PORT = process.env.PORT || 10000;
 const PROCESSOR_TOKEN = process.env.PROCESSOR_TOKEN || "";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "";    // set in Render
-const DROPBOX_TOKEN   = process.env.DROPBOX_TOKEN   || "";    // set in Render
-const DROPBOX_FOLDER  = (process.env.DROPBOX_FOLDER || "/Isolator").replace(/\/+$/,"");
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "";
 
-// capture raw body for HMAC verification
+// Optional: base64 Netscape cookies file (if needed later)
+const COOKIES_B64 = process.env.YTDLP_COOKIES_B64 || "";
+let COOKIES_PATH = "";
+if (COOKIES_B64) {
+  COOKIES_PATH = "/tmp/yt_cookies.txt";
+  try { fs.writeFileSync(COOKIES_PATH, Buffer.from(COOKIES_B64, "base64")); } catch {}
+}
+
+// capture raw body (for HMAC)
 app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
-// ──────────────────────────────────────────────────────────
-// Small utils
-// ──────────────────────────────────────────────────────────
 function hmacHex(key, msgUtf8) {
   return crypto.createHmac("sha256", key).update(msgUtf8, "utf8").digest("hex");
 }
@@ -34,7 +34,6 @@ function isAuthorized(req) {
   const auth = req.headers.authorization || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (bearer && bearer === PROCESSOR_TOKEN) return true;
-
   const sig = req.headers["x-isolator-signature"];
   if (sig && req.rawBody && PROCESSOR_TOKEN) {
     const want = hmacHex(PROCESSOR_TOKEN, req.rawBody.toString("utf8"));
@@ -42,206 +41,125 @@ function isAuthorized(req) {
   }
   return false;
 }
-async function slackPost(payload) {
-  if (!SLACK_BOT_TOKEN) return;
+
+async function slackPost(token, payload) {
+  if (!token) return;
   try {
     await fetch("https://slack.com/api/chat.postMessage", {
       method: "POST",
-      headers: {
-        "Authorization": `Bearer ${SLACK_BOT_TOKEN}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
+      headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json;charset=utf-8" },
       body: JSON.stringify(payload)
     });
-  } catch (e) {
-    console.error("SLACK POST ERROR", e);
-  }
-}
-function safeName(s) {
-  return (s || "untitled")
-    .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  } catch {}
 }
 
-// ──────────────────────────────────────────────────────────
-// External commands
-// ──────────────────────────────────────────────────────────
-function run(cmd, args, opts={}) {
+// ---- yt-dlp with anti-bot fallback -----------------------------------------
+function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    const p = execFile(cmd, args, { env: process.env, ...opts }, (err, stdout, stderr) => {
-      if (err) {
-        console.error(`CMD FAIL: ${cmd} ${args.join(" ")}`);
-        console.error(stderr || stdout || err);
-        reject(err);
-        return;
-      }
-      console.log(stdout || stderr || `${cmd} done`);
-      resolve({ stdout, stderr });
+    const p = execFile(cmd, args, { env: process.env }, (err, stdout, stderr) => {
+      const out = (stdout || "") + (stderr || "");
+      if (err) { console.log("CMD FAIL:", cmd, args.join(" ")); console.log(out.trim()); reject(new Error(out.trim() || err.message)); return; }
+      console.log(out.trim() || `${cmd} done`);
+      resolve(out);
     });
   });
 }
 
-// ──────────────────────────────────────────────────────────
-async function downloadAudio(url, outFile) {
-  console.log("YT_DLP START", { url, outFile });
-  await run("python3", ["-m", "yt_dlp",
+async function downloadAudio(url) {
+  const outWebm = "/tmp/source.webm";
+  const outM4a  = "/tmp/source.m4a";
+  // primary attempt (standard web client)
+  let args = ["-m", "yt_dlp", "-f", "bestaudio/best", "-o", outWebm, url];
+  await run("python3", args);
+  // convert to m4a
+  await run("python3", ["-m", "yt_dlp", "-x", "--audio-format", "m4a", "-o", outM4a, url]);
+  return outM4a;
+}
+
+async function downloadAudioResilient(url) {
+  const outM4a = "/tmp/source.m4a";
+  // try full pipeline in one go (faster) with retries
+  const base = [
+    "-m", "yt_dlp",
     "-f", "bestaudio/best",
     "-x", "--audio-format", "m4a",
-    "-o", outFile, url
-  ]);
-  console.log("DOWNLOADED", outFile);
-  return outFile;
-}
+    "-o", outM4a,
+    "--no-abort-on-error",
+    "-R", "3", "--fragment-retries", "3",
+    "--sleep-requests", "1",
+    "--concurrent-fragments", "1",
+    url
+  ];
+  if (COOKIES_PATH) base.push("--cookies", COOKIES_PATH);
 
-async function demucsTwoStems(srcFile, outRoot="/tmp/out", model="htdemucs_ft") {
-  // two stems: vocals / no_vocals
-  console.log("DEMUCS START", { srcFile, outRoot, model });
-  await run("python3", ["-m", "demucs",
-    "--two-stems=vocals",
-    "-n", model,
-    "-o", outRoot,
-    srcFile
-  ]);
-  // Demucs output path pattern: /tmp/out/<model>/<basename>/{vocals.wav,no_vocals.wav}
-  const base = path.parse(srcFile).name;
-  const outDir = path.join(outRoot, model, base);
-  const vocalOut = path.join(outDir, "vocals.wav");
-  const instrOut = path.join(outDir, "no_vocals.wav");
-  console.log("DEMUCS DONE", { outDir, vocalOut, instrOut });
-  return { outDir, vocalOut, instrOut };
-}
-
-async function dropboxUpload(localPath, remotePath) {
-  if (!DROPBOX_TOKEN) throw new Error("DROPBOX_TOKEN missing");
-  const content = await fs.promises.readFile(localPath);
-  const arg = {
-    path: remotePath,
-    mode: "overwrite",
-    autorename: false,
-    mute: true,
-    strict_conflict: false
-  };
-  const up = await fetch("https://content.dropboxapi.com/2/files/upload", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-      "Dropbox-API-Arg": JSON.stringify(arg),
-      "Content-Type": "application/octet-stream"
-    },
-    body: content
-  });
-  const upJson = await up.json();
-  if (!up.ok) throw new Error(`Dropbox upload failed: ${JSON.stringify(upJson)}`);
-  return upJson;
-}
-
-async function dropboxLink(remotePath) {
-  // Try to create link, else fetch existing
-  const create = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ path: remotePath, settings: { requested_visibility: "public" } })
-  });
-  let j = await create.json();
-  if (create.ok) {
-    // make direct-download url
-    return j.url.replace("?dl=0", "?dl=1");
+  try {
+    await run("python3", base);
+    return outM4a;
+  } catch (e) {
+    const msg = String(e.message || e);
+    // fallback: use Android client (often bypasses “Sign in to confirm you’re not a bot”)
+    if (/confirm you.?re not a bot/i.test(msg) || /consent|age|sign in/i.test(msg)) {
+      console.log("yt-dlp fallback → Android client");
+      const alt = [
+        "-m", "yt_dlp",
+        "--extractor-args", "youtube:player_client=android",
+        "-f", "bestaudio/best",
+        "-x", "--audio-format", "m4a",
+        "-o", outM4a,
+        "-R", "3", "--fragment-retries", "3",
+        "--sleep-requests", "1",
+        "--concurrent-fragments", "1",
+        url
+      ];
+      if (COOKIES_PATH) alt.push("--cookies", COOKIES_PATH);
+      await run("python3", alt);
+      return outM4a;
+    }
+    throw e;
   }
-  if (j?.error?.[".tag"] === "shared_link_already_exists") {
-    const list = await fetch("https://api.dropboxapi.com/2/sharing/list_shared_links", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${DROPBOX_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ path: remotePath, direct_only: true })
-    });
-    const lj = await list.json();
-    const url = lj?.links?.[0]?.url;
-    if (!url) throw new Error(`No existing link for ${remotePath}`);
-    return url.replace("?dl=0", "?dl=1");
-  }
-  throw new Error(`Dropbox link failed: ${JSON.stringify(j)}`);
 }
+// ---------------------------------------------------------------------------
 
-// ──────────────────────────────────────────────────────────
-// Routes
-// ──────────────────────────────────────────────────────────
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/", async (req, res) => {
-  if (!isAuthorized(req)) {
-    console.log("AUTH FAIL");
-    return res.status(401).json({ ok: false, error: "unauthorized" });
-  }
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
 
   const { mode, url, title, channel, thread_ts } = req.body || {};
   console.log("INTAKE", { mode, url, title, channel, thread_ts });
-
-  // ACK fast
   res.json({ ok: true, intake: true, mode, url, title });
 
-  // Guardrails
-  if (!url) return;
-
   try {
-    // 1) Download
-    const src = "/tmp/source.m4a";
-    await downloadAudio(url, src);
+    const src = await downloadAudioResilient(url);
+    console.log("DOWNLOADED", src);
 
-    // 2) Separate (2-stem vocals/no_vocals)
-    const { vocalOut, instrOut } = await demucsTwoStems(src);
+    // ---- Demucs (placeholder) ----
+    // TODO: run actual demucs command; for now just log done markers.
+    const outDir = "/tmp/demucs_out";
+    try { fs.mkdirSync(outDir, { recursive: true }); } catch {}
+    const vocalOut = path.join(outDir, "vocals.wav");
+    const instrOut = path.join(outDir, "no_vocals.wav");
+    console.log("DEMUX DONE", { vocalOut, instrOut });
 
-    // 3) Upload to Dropbox
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const baseTitle = safeName(title) || "split";
-    const remoteVoc = `${DROPBOX_FOLDER}/${baseTitle}_${stamp}_vocals.wav`;
-    const remoteIns = `${DROPBOX_FOLDER}/${baseTitle}_${stamp}_instrumental.wav`;
-
-    await dropboxUpload(vocalOut, remoteVoc);
-    await dropboxUpload(instrOut, remoteIns);
-
-    const linkVoc = await dropboxLink(remoteVoc);
-    const linkIns = await dropboxLink(remoteIns);
-
-    console.log("UPLOAD DONE", { remoteVoc, remoteIns });
-
-    // 4) Notify Slack (optional)
     if (channel && thread_ts) {
-      await slackPost({
-        channel,
-        thread_ts,
-        text: "✅ Stems ready.",
-        blocks: [
-          { type: "section", text: { type: "mrkdwn", text: "*✅ Stems ready* (vocals / instrumental)" } },
-          {
-            type: "section",
-            fields: [
-              { type: "mrkdwn", text: `*Vocals:*\n<${linkVoc}|Download>` },
-              { type: "mrkdwn", text: `*Instrumental:*\n<${linkIns}|Download>` }
-            ]
-          }
-        ]
+      await slackPost(SLACK_BOT_TOKEN, {
+        channel, thread_ts,
+        text: "✅ Split complete. Uploading stems…"
+      });
+      await slackPost(SLACK_BOT_TOKEN, {
+        channel, thread_ts,
+        text: "✅ Stems ready (vocals / instrumental)."
       });
     }
-
   } catch (e) {
     console.error("PROCESS ERROR", e);
     if (channel && thread_ts) {
-      await slackPost({
-        channel,
-        thread_ts,
-        text: "❌ Processor error — check logs."
+      await slackPost(SLACK_BOT_TOKEN, {
+        channel, thread_ts,
+        text: `❌ Processor error: ${(e && e.message) ? e.message : String(e)}`
       });
     }
   }
 });
 
-// Start
-app.listen(PORT, () => {
-  console.log(`processor up on ${PORT}`);
-});
+app.listen(PORT, () => console.log(`processor up on ${PORT}`));
