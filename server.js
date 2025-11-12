@@ -56,82 +56,79 @@ async function slackPost(token, payload) {
 // ---- yt-dlp with anti-bot fallback -----------------------------------------
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    const p = execFile(cmd, args, { env: process.env }, (err, stdout, stderr) => {
+    execFile(cmd, args, { env: process.env }, (err, stdout, stderr) => {
       const out = (stdout || "") + (stderr || "");
-      if (err) { console.log("CMD FAIL:", cmd, args.join(" ")); console.log(out.trim()); reject(new Error(out.trim() || err.message)); return; }
+      if (err) {
+        console.log("CMD FAIL:", cmd, args.join(" "));
+        console.log(out.trim());
+        reject(new Error(out.trim() || err.message));
+        return;
+      }
       console.log(out.trim() || `${cmd} done`);
       resolve(out);
     });
   });
 }
 
-async function downloadAudio(url) {
-  const outWebm = "/tmp/source.webm";
-  const outM4a  = "/tmp/source.m4a";
-  // primary attempt (standard web client)
-  let args = ["-m", "yt_dlp", "-f", "bestaudio/best", "-o", outWebm, url];
-  await run("python3", args);
-  // convert to m4a
-  await run("python3", ["-m", "yt_dlp", "-x", "--audio-format", "m4a", "-o", outM4a, url]);
-  return outM4a;
-}
+// Download bestaudio as m4a directly (no ffmpeg), using cookies if present
+async function downloadAudioResilient(youtubeUrl, cookiesPath) {
+  const args = ["-m", "yt_dlp"];
 
-async function downloadAudioResilient(url) {
-  const outM4a = "/tmp/source.m4a";
-  // try full pipeline in one go (faster) with retries
-  const base = [
-    "-m", "yt_dlp",
-    "-f", "bestaudio/best",
-    "-x", "--audio-format", "m4a",
-    "-o", outM4a,
-    "--no-abort-on-error",
-    "-R", "3", "--fragment-retries", "3",
-    "--sleep-requests", "1",
-    "--concurrent-fragments", "1",
-    url
-  ];
-  if (COOKIES_PATH) base.push("--cookies", COOKIES_PATH);
-
+  // attach cookies if the file exists and is non-empty
   try {
-    await run("python3", base);
-    return outM4a;
-  } catch (e) {
-    const msg = String(e.message || e);
-    // fallback: use Android client (often bypasses “Sign in to confirm you’re not a bot”)
-    if (/confirm you.?re not a bot/i.test(msg) || /consent|age|sign in/i.test(msg)) {
-      console.log("yt-dlp fallback → Android client");
-      const alt = [
-        "-m", "yt_dlp",
-        "--extractor-args", "youtube:player_client=android",
-        "-f", "bestaudio/best",
-        "-x", "--audio-format", "m4a",
-        "-o", outM4a,
-        "-R", "3", "--fragment-retries", "3",
-        "--sleep-requests", "1",
-        "--concurrent-fragments", "1",
-        url
-      ];
-      if (COOKIES_PATH) alt.push("--cookies", COOKIES_PATH);
-      await run("python3", alt);
-      return outM4a;
+    if (cookiesPath && fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
+      args.push("--cookies", cookiesPath);
     }
-    throw e;
+  } catch {}
+
+  // prefer m4a, fall back to any bestaudio
+  args.push(
+    "-f", "bestaudio[ext=m4a]/bestaudio",
+    "-o", "/tmp/source.%(ext)s",
+    youtubeUrl
+  );
+
+  await run("python3", args);
+
+  // pick the file yt-dlp actually wrote
+  for (const ext of ["m4a", "mp4", "webm"]) {
+    const guess = `/tmp/source.${ext}`;
+    if (fs.existsSync(guess)) return guess;
   }
+  throw new Error("No downloaded source found in /tmp");
 }
+
 // ---------------------------------------------------------------------------
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/", async (req, res) => {
-  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+if (!isAuthorized(req)) {
+  return res.status(401).json({ ok: false, error: "unauthorized" });
+}
 
-  const { mode, url, title, channel, thread_ts } = req.body || {};
-  console.log("INTAKE", { mode, url, title, channel, thread_ts });
-  res.json({ ok: true, intake: true, mode, url, title });
+// include cookies_b64 from body; keep other fields
+const { mode, url, title, channel, thread_ts, cookies_b64 } = req.body || {};
+console.log("INTAKE", { mode, url, title, channel, thread_ts });
 
-  try {
-    const src = await downloadAudioResilient(url);
-    console.log("DOWNLOADED", src);
+// optional cookie file for yt-dlp anti-bot
+let cookiesPath = COOKIES_PATH;
+try {
+  if (cookies_b64) {
+    const raw = Buffer.from(String(cookies_b64), "base64");
+    fs.writeFileSync(COOKIES_PATH, raw);
+    console.log("COOKIE FILE WRITTEN", cookiesPath);
+  }
+} catch (e) {
+  console.error("COOKIE WRITE ERROR", e);
+}
+
+// fast ACK
+res.json({ ok: true, intake: true, mode, url, title });
+
+try {
+  const src = await downloadAudioResilient(url, cookiesPath);
+  console.log("DOWNLOADED", src);
 
     // ---- Demucs (placeholder) ----
     // TODO: run actual demucs command; for now just log done markers.
