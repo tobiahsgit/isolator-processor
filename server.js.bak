@@ -75,17 +75,11 @@ async function downloadAudioResilient(youtubeUrl, cookiesPath) {
   const args = ["-m", "yt_dlp"];
 
   // attach cookies if the file exists and is non-empty
-  let usingCookies = false;
   try {
-    if (cookiesPath &&
-        require("node:fs").existsSync(cookiesPath) &&
-        require("node:fs").statSync(cookiesPath).size > 0) {
+    if (cookiesPath && fs.existsSync(cookiesPath) && fs.statSync(cookiesPath).size > 0) {
       args.push("--cookies", cookiesPath);
-      usingCookies = true;
     }
   } catch {}
-
-  console.log("YT-DLP CONFIG", { usingCookies, cookiesPath });
 
   // prefer m4a, fall back to any bestaudio
   args.push(
@@ -94,13 +88,12 @@ async function downloadAudioResilient(youtubeUrl, cookiesPath) {
     youtubeUrl
   );
 
-  console.log("RUN YT-DLP", { cmd: "python3 -m yt_dlp", args: args.slice(1) });
   await run("python3", args);
 
   // pick the file yt-dlp actually wrote
   for (const ext of ["m4a", "mp4", "webm"]) {
     const guess = `/tmp/source.${ext}`;
-    if (require("node:fs").existsSync(guess)) return guess;
+    if (fs.existsSync(guess)) return guess;
   }
   throw new Error("No downloaded source found in /tmp");
 }
